@@ -8,22 +8,9 @@ import (
 	"strings"
 )
 
-func init() {
-	_, err := os.Stat("data/asakamiplugins/db")
-	if err != nil && os.IsNotExist(err) {
-		err := os.MkdirAll("data/asakamiplugins/db", 0755)
-		if err != nil {
-			panic(err)
-		}
-	}
-}
-
-func NewASAKAMIDB() *ASAKAMIDB {
-	return &ASAKAMIDB{}
-}
-
 type ASAKAMIDB struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 type Table interface {
@@ -35,9 +22,20 @@ type Table interface {
 
 type value interface{}
 
+func (a *ASAKAMIDB) initdir() {
+	_, err := os.Stat(a.path)
+	if err != nil && os.IsNotExist(err) {
+		err := os.MkdirAll(a.path, 0755)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
 func (a *ASAKAMIDB) OpenDB(dbname string) error {
 	var err error
-	a.db, err = sql.Open("sqlite3", "data/asakamiplugins/db/"+dbname+".db")
+	a.initdir()
+	a.db, err = sql.Open("sqlite3", a.path+dbname+".db")
 	return err
 }
 
