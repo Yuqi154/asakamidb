@@ -19,10 +19,10 @@ type Table interface {
 	Name() string
 	Schema() string
 	Columns() []string
-	Values() []value
+	Values() []interface{}
 }
 
-type value interface{}
+type Value []interface{}
 
 // NewDB 创建一个新的 ASAKAMIDB 结构。
 func NewDB(path string) *ASAKAMIDB {
@@ -85,32 +85,28 @@ func (a *ASAKAMIDB) CreateTable(Table Table) error {
 // Insert 插入一行数据到表 Table。
 // 如果插入失败，它将返回一个错误。
 // Table接口由用户定义，用户可以自定义表结构。
-func (a *ASAKAMIDB) Insert(Table Table) error {
-	columnsSQL := strings.Join(Table.Columns(), ", ")
-	placeholders := strings.Repeat("?, ", len(Table.Columns()))
+func (a *ASAKAMIDB) Insert(t Table) error {
+	columnsSQL := strings.Join(t.Columns(), ", ")
+	placeholders := strings.Repeat("?, ", len(t.Columns()))
 	placeholders = strings.TrimSuffix(placeholders, ", ")
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", Table.Name(), columnsSQL, placeholders)
-	values := make([]interface{}, len(Table.Values()))
-	for i, v := range Table.Values() {
-		values[i] = v
-	}
-	_, err := a.db.Exec(insertSQL, values...)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", t.Name(), columnsSQL, placeholders)
+	_, err := a.db.Exec(insertSQL, t.Values()...)
 	return err
 }
 
 // InsertWithStruct 插入一行数据到表 Table。
 // 如果插入失败，它将返回一个错误。
 // 允许传入任意结构，但是必须是一个结构。
-func (a *ASAKAMIDB) InsertWithStruct(Table Table, model interface{}) error {
-	t := reflect.TypeOf(model)
+func (a *ASAKAMIDB) InsertWithStruct(t Table, model interface{}) error {
+	r := reflect.TypeOf(model)
 	v := reflect.ValueOf(model)
-	if t.Kind() != reflect.Struct {
+	if r.Kind() != reflect.Struct {
 		return fmt.Errorf("model must be a struct")
 	}
 	var columns []string
 	var values []interface{}
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
+	for i := 0; i < r.NumField(); i++ {
+		field := r.Field(i)
 		fieldName := field.Name
 		fieldValue := v.Field(i).Interface()
 		columns = append(columns, fieldName)
@@ -119,53 +115,50 @@ func (a *ASAKAMIDB) InsertWithStruct(Table Table, model interface{}) error {
 	columnsSQL := strings.Join(columns, ", ")
 	placeholders := strings.Repeat("?, ", len(columns))
 	placeholders = strings.TrimSuffix(placeholders, ", ")
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", Table.Name(), columnsSQL, placeholders)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", t.Name(), columnsSQL, placeholders)
 	_, err := a.db.Exec(insertSQL, values...)
 	return err
 }
 
 // Deletetable 删除表 Table。
-func (a *ASAKAMIDB) Deletetable(Table Table) error {
-	_, err := a.db.Exec("DROP TABLE " + Table.Name())
+func (a *ASAKAMIDB) Deletetable(t Table) error {
+	_, err := a.db.Exec("DROP TABLE " + t.Name())
 	return err
 }
 
 // Delete 删除表 Table 中的数据。
-func (a *ASAKAMIDB) Delete(Table Table) error {
-	_, err := a.db.Exec("DELETE FROM " + Table.Name() + " WHERE " + awhere(Table))
+func (a *ASAKAMIDB) Delete(t Table) error {
+	_, err := a.db.Exec("DELETE FROM " + t.Name() + " WHERE " + awhere(t))
 	return err
 }
 
 // Update 更新表 Table 中的数据。
-func (a *ASAKAMIDB) Update(Table Table, newvalue []value) error {
-	columns := Table.Columns()
-	var set []string
-	for _, column := range columns {
-		set = append(set, column+"=?")
-	}
-	setSQL := strings.Join(set, ", ")
-	updateSQL := fmt.Sprintf("UPDATE %s SET %s WHERE %s;", Table.Name(), setSQL, awhere(Table))
-	values := make([]interface{}, len(newvalue))
-	for i, v := range newvalue {
-		values[i] = v
-	}
-
-	_, err := a.db.Exec(updateSQL, values...)
-	return err
+// 先前的数据将被新数据替换。
+func (a *ASAKAMIDB) Update(Table Table) error {
+	a.Deletetable(Table)
+	return a.Insert(Table)
 }
 
 // Selectall 从表 Table 中选择所有数据。
-func (a *ASAKAMIDB) Selectall(Table Table) (*sql.Rows, error) {
-	return a.db.Query("SELECT * FROM " + Table.Name())
+func (a *ASAKAMIDB) Selectall(t Table) ([]interface{}, error) {
+	rows, err := a.db.Query("SELECT * FROM " + t.Name())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []interface{}
+	for rows.Next() {
+		err := rows.Scan(result...)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // SelectData 从表 Table 中选择数据。
-func (a *ASAKAMIDB) SelectData(Table Table) (*sql.Rows, error) {
-	values := make([]interface{}, len(Table.Values()))
-	for i, v := range Table.Values() {
-		values[i] = v
-	}
-	return a.db.Query("SELECT * FROM "+Table.Name()+" WHERE "+awhere(Table), values...)
+func (a *ASAKAMIDB) SelectData(t Table) (*sql.Rows, error) {
+	return a.db.Query("SELECT * FROM "+t.Name()+" WHERE "+awhere(t), t.Values()...)
 }
 
 func generateCreateTableSQL(Name string, model interface{}) (string, error) {
@@ -214,14 +207,13 @@ func goTypeToSQLType(t reflect.Type) (string, error) {
 
 // awhere 生成 WHERE 子句。
 // 如果值为 nil，则不包含在 WHERE 子句中。
-func awhere(Table Table) string {
-	columns := Table.Columns()
+func awhere(t Table) string {
+	columns := t.Columns()
 	var where []string
-	for _, column := range columns {
-		if Table.Values()[0] == nil {
-			continue
+	for i, column := range columns {
+		if t.Values()[i] != nil {
+			where = append(where, fmt.Sprintf("%s = ?", column))
 		}
-		where = append(where, column+"=?")
 	}
 	return strings.Join(where, " AND ")
 }
